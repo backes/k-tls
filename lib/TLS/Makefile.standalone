@@ -1,0 +1,58 @@
+OBJDIR ?= obj
+Q ?= @
+ifeq ($(VERBOSE),1)
+  Q=
+endif
+
+LIBRARY = $(OBJDIR)/libTLS.so
+
+SOURCES   = $(wildcard *.cpp)
+
+OBJFILES  = $(SOURCES:%.cpp=$(OBJDIR)/%.o)
+OBJDIRS   = $(addsuffix .dir,$(sort $(dir $(OBJFILES))))
+
+all : $(LIBRARY)
+
+# rebuild everything if the Makefile changes, and build obj dirs first:
+DEPS = Makefile | $(OBJDIRS)
+
+# include dependency files:
+-include $(OBJFILES:.o=.d)
+
+.PHONY: all clean
+
+# Keep .dir files after building
+.PRECIOUS: %/.dir
+
+
+CXX      ?= g++
+CPPFLAGS += -MMD -I../../include -DSTANDALONE
+CXXFLAGS += -Wall -pedantic -std=c++11
+LDFLAGS   = -lm -lpthread -ldl
+MKDIR    ?= mkdir -p
+
+ifeq ($(VERBOSE),1)
+  CPPFLAGS += -DVERBOSE
+endif
+ifeq ($(DEBUG),1)
+  CPPFLAGS += -O0 -ggdb
+else
+  CPPFLAGS += -O2 -DNDEBUG
+endif
+
+clean :
+	$(Q)rm -f $(LIBRARY)
+	$(Q)rm -rf $(OBJDIR)
+
+$(LIBRARY) : $(OBJFILES) $(DEPS)
+	$(Q)echo Linking $@
+	$(Q)ar cru $@ $(OBJFILES)
+	$(Q)ranlib $@
+
+%/.dir :
+	$(Q)$(MKDIR) $(@D)
+	$(Q)echo >$@
+
+$(OBJFILES) : $(OBJDIR)/%.o : %.cpp $(DEPS)
+	$(Q)echo Compiling $*.cpp
+	$(Q)$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
