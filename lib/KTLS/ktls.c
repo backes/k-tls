@@ -990,33 +990,6 @@ out:
     return ret;
 }
 
-/**
- * This function takes a user space virtual address and the task it belongs to
- * and returns the virtual address in kernel space. The caller can cast this address
- * to a pointer and dereference it to access its content.
- * Returns 0 if no page is mapped for addr.
- *
- * The target page pointer will be set to the page descriptor addr is mapped to.
- * NOTE: The mapping introduced by kmap() has to be unmapped with kunmap() after usage
- */
-static FORCE_USE unsigned long
-get_kernel_space_addr(struct mm_struct *mm, unsigned long addr,
-                      struct page **target_page_ptr) {
-    unsigned int page_offset = addr & (PAGE_SIZE - 1);
-    down_read(&(mm->mmap_sem));
-    struct vm_area_struct *target_vma = find_vma(mm, addr);
-    ASSERT (target_vma != 0);
-
-    unsigned int page_size;
-    *target_page_ptr = kernel_follow_page_mask(target_vma, addr, 0, &page_size);
-    ASSERT ((page_size == 0) && "hugepages not supported!!");
-    unsigned long kaddr = 0;
-    if (*target_page_ptr != 0)
-        kaddr = ((unsigned long) kmap(*target_page_ptr)) + page_offset;
-    up_read(&(mm->mmap_sem));
-    return kaddr;
-}
-
 /*
  * don't hold any mmap_sem for read or write when calling this function.
  *
