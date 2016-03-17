@@ -1,9 +1,13 @@
 SUBDIRS=lib/TLS lib/KTLS lib/tinySTM
 
-all: $(addsuffix /.make, $(SUBDIRS))
+# Provide these targets, which delegate to all subdirs
+# (all must be first, to be default target!)
+RecursiveTargets=all clean
 
-%/.make:
-	make -C $(@D)
+$(RecursiveTargets): % : $(addsuffix /.make%, $(SUBDIRS))
+
+$(foreach t,$(RecursiveTargets),%/.make$(t)):
+	make -C $(@D) $(subst $(@D)/.make,,$@)
 
 # vim:ft=make
 #

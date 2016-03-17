@@ -12,6 +12,12 @@ endif
 
 ifeq ($(KERNEL_BUILD_DIR),)
 
+ifeq ($(MODULES_DIR),)
+$(warning Skipping KTLS kernel module, since /lib/modules does not exist)
+else
+$(warning Skipping KTLS kernel module, since /lib/modules exists, but not /lib/modules/$(KERNEL_VERSION)/build)
+endif
+
 LEVEL = ../..
 ifneq (,$(wildcard $(LEVEL)/Makefile.common))
 	include $(LEVEL)/Makefile.common
@@ -20,11 +26,7 @@ endif
 Echo ?= @echo
 
 all::
-ifeq ($(MODULES_DIR),)
-	$(Echo) Skipping KTLS kernel module, since /lib/modules does not exist
-else
-	$(Echo) WARNING: Skipping KTLS kernel module, since /lib/modules exists, but not /lib/modules/$(KERNEL_VERSION)/build
-endif
+clean::
 
 else
 
