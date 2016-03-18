@@ -16,8 +16,8 @@ Building
 The software (TinySTM, U-TLS and K-TLS) is split into different directories in
 the `lib` folder.
 All this software can be built by running the `make` command. If you need to
-pass additional compiler or preprocessor flags, you can pass them on the
-command line as follows:
+pass additional compiler or preprocessor flags, you place them in the
+corresponding environment variables, for example like this:
 ```
   CPPFLAGS=-I/usr/local/include make
 ```
