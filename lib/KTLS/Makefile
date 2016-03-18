@@ -91,6 +91,10 @@ OBJ_FILES = $(addprefix $(ObjDir)/, $(BUILD_FILES))
 
 all:: $(INSTALLED_MOD)
 
+clean:: $(ObjDir)/Makefile
+	$(Verb) (set -o pipefail; $(MAKE) V=$(VERBOSE) -C $(KERNEL_BUILD_DIR) M=$(ObjDir) clean 2>&1 | sed 's#$(ObjDir)#$(PROJ_SRC_DIR)#g')
+	$(Verb) rm -f $(INSTALLED_MOD) $(OBJ_FILES) $(GENERATED_FILES) $(addprefix $(ObjDir)/,$(SOURCES:.c=.o) syscalls.o)
+
 $(INSTALLED_MOD): $(MOD)
 	$(Verb) $(MKDIR) $(@D)
 	$(Verb) $(CP) $< $@
