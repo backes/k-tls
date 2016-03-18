@@ -3100,6 +3100,14 @@ int stm_commit_tx(struct stm_tx *tx) {
   } while (w > tx->w_set.entries);
 #endif /* DESIGN == WRITE_BACK_CTL */
 
+  /* determine the location of the current stack frame.
+   * it is not so easy to determine the end (downwards) of the frame, so just
+   * protect one memory page (4k). this should suffice for the execution of this
+   * function.
+   */
+  stm_word_t *frame_base = (stm_word_t*) __builtin_frame_address(0) + 2;
+  stm_word_t *frame_end = frame_base - 4096 / sizeof(*frame_base);
+
 #ifdef IRREVOCABLE_ENABLED
   /* Verify if there is an irrevocable transaction once all locks have been acquired */
 # ifdef IRREVOCABLE_IMPROVED
@@ -3148,14 +3156,6 @@ int stm_commit_tx(struct stm_tx *tx) {
     }
     RESTART_COLLECT_STATS;
   }
-
-  /* determine the location of the current stack frame.
-   * it is not so easy to determine the end (downwards) of the frame, so just
-   * protect one memory page (4k). this should suffice for the execution of this
-   * function.
-   */
-  stm_word_t *frame_base = (stm_word_t*) __builtin_frame_address(0) + 2;
-  stm_word_t *frame_end = frame_base - 4096 / sizeof(*frame_base);
 
 #ifdef IRREVOCABLE_ENABLED
   release_locks:
