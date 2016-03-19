@@ -19,6 +19,11 @@ extern "C" {
 
 /**
  * The all-in-one interface: take a TaskList and run all tasks contained in it.
+ * The file handle for connecting to the kernel module will be opened
+ * automatically on the first call to this function, and will remain open until
+ * the termination of the whole executing process (so basically forever).
+ * If any error occurs (e.g. because the kernel module is not available), then
+ * an error message is print to stderr, and the program is aborted.
  */
 void ktls_run(void *taskList);
 
