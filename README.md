@@ -41,6 +41,19 @@ observe the kernel messages printed:
   dmesg -wT
 ```
 
+The API (for both C and C++) for creating a task list is documented in the
+[tls.h header file](include/TLS/tls.h).
+This task list can then be run either in K-TLS or in U-TLS by running the
+`ktls_run` (see [ktls.h header file](include/TLS/ktls.h)) or `utls_run` (see
+[utls.h header file](include/TLS/utls.h)) function respectively.
+
+For K-TLS, there is also a loop interface, which makes instrumentation easier
+for speculative loop parallelization. Currently, the implementation just
+internally aggregates a task for each iteration, and spawns them once 16 tasks
+are available.
+
+A few *example usages* of the interface are available in the [test directory](test/).
+
 Authors
 =======
 
