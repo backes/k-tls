@@ -1,5 +1,4 @@
 /* KTLS - Kernel Thread-Level Speculation
- * KTLS is a part of the ktls framework
  *
  * ktls_ioctl.h - Shared definitions
  *

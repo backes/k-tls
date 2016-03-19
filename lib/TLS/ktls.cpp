@@ -1,8 +1,7 @@
 /*
- * ktls.cpp - User space interface to the KTLS kernel module
- *
  * KTLS - Kernel Thread-Level Speculation
- * KTLS is a part of the sambamba framework
+ *
+ * ktls.cpp - User space interface to the KTLS kernel module
  *
  * Authors: Clemens Hammacher <hammacher@cs.uni-saarland.de>
  *          Janosch Graef <janosch.graef@gmx.net>

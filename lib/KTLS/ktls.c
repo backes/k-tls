@@ -1,9 +1,9 @@
 /* KTLS - Kernel Thread-Level Speculation
- * KTLS is a part of the sambamba framework
  *
  * ktls.c - Implementation of the kernel module
- * Authors: Janosch Graef <janosch.graef@gmx.net>
- *          Clemens Hammacher <hammacher@cs.uni-saarland.de>
+ *
+ * Authors: Clemens Hammacher <hammacher@cs.uni-saarland.de>
+ *          Janosch Graef <janosch.graef@gmx.net>
  *          Daniel Birtel <daniel.birtel@stud.uni-saarland.de>
  *
  *

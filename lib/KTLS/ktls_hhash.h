@@ -1,5 +1,7 @@
-/*
- * ktls_hhash.h
+/* KTLS - Kernel Thread-Level Speculation
+ *
+ * ktls_hhash.h - hopscotch hashing implementation for usage by linux kernel
+ *                modules
  *
  *  Created on: Sep 23, 2013
  *      Author: Clemens Hammacher <hammacher@cs.uni-saarland.de>

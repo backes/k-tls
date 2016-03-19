@@ -1,5 +1,5 @@
 /*
- * ktls_vector.h
+ * ktls_vector.h - a dynamically sized vector implementation in kernel space
  *
  * Created on: Sep 9, 2015
  *     Author: Clemens Hammacher <hammacher@cs.uni-saarland.de>

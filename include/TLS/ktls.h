@@ -1,7 +1,7 @@
 /* KTLS - Kernel Thread-Level Speculation
- * KTLS is a part of the sambamba framework
  *
- * test/ktls.h - User space interface to the KTLS kernel module
+ * ktls.h - Definitions and documentation for the ktls user-space interface
+ *
  * Authors: Clemens Hammacher <hammacher@cs.uni-saarland.de>
  *          Janosch Graef <janosch.graef@gmx.net>
  */
