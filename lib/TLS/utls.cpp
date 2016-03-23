@@ -975,19 +975,22 @@ extern "C" {
         // Otherwise, it would be sufficient to move %rsp to a different page than %rbp.
         // On the other hand, it should not make any difference, since this function
         // does not use stack variables :)
-        asm volatile (
-                // Compute offset of the current stack page (in callee-saved register, needed later!)
-                "mov $0x0fff, %%ebx;\n" // resets the upper 32 bit
-                "and %%rsp, %%rbx;\n"
-                // Reset these bits in %rsp
-                "xor %%rbx, %%rsp;\n"
-                "call *%0;\n"
-                // Restore %rsp
-                "or %%rbx, %%rsp;\n"
-                : /* output */
-                : /* input */ "r" (runTasks), "D" /* 1st param in rdi */ (list)
-                : /* clobbered */ "rbx", "memory"
-        );
+        asm volatile(
+            // save old content of %rbx
+            "push %%rbx\n"
+            // save %rsp in %rbx
+            "mov %%rsp, %%rbx\n"
+            // clear the lower 12 bits in %rsp
+            "and $0xfffffffffffff000, %%rsp\n"
+            // now call runTasks
+            "call *%0;\n"
+            // restore %rsp
+            "mov %%rbx, %%rsp\n"
+            // restore %rbx
+            "pop %%rbx\n"
+            : /* output */
+            : /* input */ "r"(runTasks), "D" /* 1st param in rdi */(list)
+            : /* clobbered */ "memory");
     }
 
 }
