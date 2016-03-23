@@ -18,7 +18,8 @@
 #include <cstring>  /* memset */
 #include <limits.h> /* IOV_MAX */
 #include <new>      /* placement new */
-#include <vector>
+#include <utility>  /* std::pair */
+#include <sched.h>  /* clone */
 #include <signal.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -32,7 +33,7 @@
 
 #ifdef STANDALONE
 # ifdef VERBOSE
-#  define DEBUG(code) do { code } while (0)
+#  define DEBUG(code) do { code; } while (0)
 # else
 #  define DEBUG(code) do { } while (0)
 # endif
@@ -45,7 +46,19 @@ using namespace TLS;
 
 namespace {
 
-struct utls_stats stats;
+struct utls_stats *get_stats() {
+  static struct utls_stats *stats = nullptr;
+  if (stats == nullptr) {
+    stats = (struct utls_stats *)mmap(0, (sizeof(*stats) + 4095) & ~4095ULL,
+                                      PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (stats == MAP_FAILED) {
+      perror("mmap stats space");
+      abort();
+    }
+  }
+  return stats;
+}
 
 struct RangeToProtect {
     void *start;
@@ -59,6 +72,7 @@ struct RunningTaskInformation {
 
     pid_t pid; // process id of the fork executing this task
     int pipe_read_end;
+    int pipe_write_end;
     PageHashSet touchedPages;
 
     /* these values communicate to the parent how much to read from the pipe */
@@ -103,7 +117,6 @@ struct TlsChildInfo {
     int32_t numRangesToProtect;
     int (*mProtectFn)(void*, size_t, int);
     void *stack;
-    int pipe_write_end;
     uint32_t stackSize;
     RunningTaskInformation *runningTaskInformation;
     RangeToProtect rangesToProtect[1]; // grows beyond this object
@@ -375,36 +388,27 @@ void collectReadAndWrittenRanges(void* *readPages, uint32_t numPages,
     *numRegionsWritten = numWrittenRanges;
 }
 
-__attribute__((noreturn))
-void runTLSChild() {
+int runTLSChild(void * /*unused*/) {
+    TlsChildInfo *info = GET_TLS_CHILDINFO();
+
 
     //printf("In tls child.\n"); fflush(stdout);
 
-    TlsChildInfo *info = GET_TLS_CHILDINFO();
+    DEBUG(printf("child process id: %d (parent %d), read safe: %d\n", getpid(),
+                 getppid(), info->runningTaskInformation->isReadSafe);
+          fflush(stdout));
 
-    //printf("Collecting memory mapping...\n"); fflush(stdout);
-
-    char *alignedTaskInfo =
-        (char *)((uint64_t)info->runningTaskInformation & ~4095ULL);
-    std::pair<void *, void *> unprotectedRanges[] = {
-        std::make_pair(info, (char *)info + 4096),
-        std::make_pair(alignedTaskInfo, alignedTaskInfo + 4096),
-        std::make_pair(info->stack, (char *)info->stack + info->stackSize),
-        std::make_pair(info->runningTaskInformation->touchedPages.V,
-                       (char *)info->runningTaskInformation->touchedPages.V +
-                           4096), };
-    unsigned numUnprotectedRanges =
-        sizeof(unprotectedRanges) / sizeof(*unprotectedRanges);
-
-    int32_t memoryRangeCapacity = ((uint64_t) info + 4096 - (uint64_t) (info->rangesToProtect)) / sizeof(RangeToProtect);
-    //printf("capacity for memory ranges: %d\n", memoryRangeCapacity);
-    info->numRangesToProtect =
-        collectRangesToProtect(info->rangesToProtect, memoryRangeCapacity,
-                               unprotectedRanges, numUnprotectedRanges);
-    if (info->numRangesToProtect == -1) {
-        fprintf(stderr, "memory ranges to protect exceed capacity of %d\n", memoryRangeCapacity);
-        abort();
+#ifndef NDEBUG
+    char *secondsStr = getenv("TLS_SLEEP");
+    int sleepSeconds = secondsStr ? atoi(secondsStr) : 0;
+    if (sleepSeconds) {
+      printf("Waiting for %d seconds...\n", sleepSeconds);
+      fflush(stdout);
+      sleep(sleepSeconds);
+      printf("Continuing...\n");
+      fflush(stdout);
     }
+#endif
 
     //printf("Registering SEGV handler.\n"); fflush(stdout);
 
@@ -420,7 +424,6 @@ void runTLSChild() {
     volatile auto pthread_cond_signal_ptr = pthread_cond_signal;
     volatile auto pthread_mutex_lock_ptr = pthread_mutex_lock;
     volatile auto pthread_mutex_unlock_ptr = pthread_mutex_unlock;
-    volatile auto raise_ptr = raise;
     volatile auto write_ptr = write;
 #ifdef __linux__
     volatile auto vmsplice_ptr = vmsplice;
@@ -479,11 +482,12 @@ void runTLSChild() {
     size_t bytesToWrite = (numReadRanges + numWrittenRanges) * sizeof(iovec);
     size_t written = 0;
     while (written < bytesToWrite) {
-      size_t newWritten =
-          write_ptr(info->pipe_write_end, ((char *)touchedRanges) + written,
-                    bytesToWrite - written);
-      if (newWritten == 0) {
-        perror("no more bytes written");
+      ssize_t newWritten =
+          write_ptr(info->runningTaskInformation->pipe_write_end,
+                    ((char *)touchedRanges) + written, bytesToWrite - written);
+      if (newWritten < 1) {
+        perror(newWritten == 0 ? "no more bytes written"
+                               : "error writing to pipe");
         abort();
       }
       written += newWritten;
@@ -499,11 +503,12 @@ void runTLSChild() {
 
     while (rangesRemaining) {
         size_t nr_regs = rangesRemaining > IOV_MAX ? IOV_MAX : rangesRemaining;
-        ssize_t bytesOrError = vmsplice_ptr(info->pipe_write_end, nextRange,
-                                            nr_regs, SPLICE_F_GIFT);
+        ssize_t bytesOrError =
+            vmsplice_ptr(info->runningTaskInformation->pipe_write_end,
+                         nextRange, nr_regs, SPLICE_F_GIFT);
         if (bytesOrError == -1) {
           fprintf(stderr, "vmsplice modified pages to pipe (fd %d): %s\n",
-                  info->pipe_write_end, strerror(errno));
+                  info->runningTaskInformation->pipe_write_end, strerror(errno));
           abort();
         }
         size_t numBytes = bytesOrError;
@@ -545,28 +550,13 @@ void runTLSChild() {
 
     //printf("Exiting child.\n"); fflush(stdout);
 
-    //exit_ptr(0);
-    while (true) {
-        raise_ptr(SIGKILL);
-    }
-}
-
-__attribute__((noreturn))
-void switchStackAndRunTLSChild(void *topOfStack) {
-    asm volatile (
-            "movq %0, %%rsp;\n"
-            "jmp *%1"
-            : /* output */
-            : /* input */ "r" (topOfStack), "r" (runTLSChild)
-            : /* clobbered */ "rsp"
-    );
-    __builtin_unreachable();
+    return 0;
 }
 
 void spawnTask() {
     TlsChildInfo *childInfo = GET_TLS_CHILDINFO();
 
-    __sync_fetch_and_add(&stats.num_tasks, 1);
+    __sync_fetch_and_add(&get_stats()->num_tasks, 1);
 
     // Open a pipe for communication with this child (child writes, parent reads).
     int childPipe[2];
@@ -576,62 +566,19 @@ void spawnTask() {
     }
     DEBUG(printf("pipe: (%d, %d)\n", childPipe[0], childPipe[1]); fflush(stdout));
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        /* This is the child process. */
+    childInfo->runningTaskInformation->pipe_read_end = childPipe[0];
+    childInfo->runningTaskInformation->pipe_write_end = childPipe[1];
 
-        // Close reading end of the pipe
-        if (close(childPipe[0])) {
-            perror("close reading pipe end in child");
-            abort();
-        }
+    char *topOfStack = (char *)childInfo->stack + childInfo->stackSize;
 
-        DEBUG(printf("child process id: %d, read safe: %d\n", getpid(),
-            childInfo->runningTaskInformation->isReadSafe); fflush(stdout));
-
-#ifndef NDEBUG
-        char *secondsStr = getenv("TLS_SLEEP");
-        int sleepSeconds = secondsStr ? atoi(secondsStr) : 0;
-        if (sleepSeconds) {
-            printf("Waiting for %d seconds...\n", sleepSeconds);
-            fflush(stdout);
-            sleep(sleepSeconds);
-            printf("Continuing...\n");
-            fflush(stdout);
-        }
-#endif
-
-        // Now allocate a new stack, so that the different tasks don't collide on that.
-        size_t stackSize = 1 << 22;
-        void *stack = mmap(0, stackSize, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
-        if (stack == MAP_FAILED) {
-            perror("mmap task stack");
-            abort();
-        }
-        //printf("new stack: %p\n", stack); fflush(stdout);
-
-        childInfo->pipe_write_end = childPipe[1];
-        childInfo->stack = stack;
-        childInfo->stackSize = stackSize;
-
-        char *topOfStack = (char*) stack + stackSize;
-
-        switchStackAndRunTLSChild(topOfStack);
-        __builtin_unreachable();
-    } else if (pid < 0) {
+    pid_t pid = clone(runTLSChild, topOfStack,
+                      CLONE_FILES | CLONE_FS | CLONE_IO | SIGCHLD, nullptr);
+    if (pid < 0) {
         perror("fork UTLS child.");
         abort();
     }
 
-    /* We are the parent. */
     //printf("forked child %d: PID %d\n", childInfo->task->seqNr, pid); fflush(stdout);
-
-    // Close writing end of the pipe
-    if (close(childPipe[1])) {
-        perror("close writing pipe end in parent");
-        abort();
-    }
-    childInfo->runningTaskInformation->pipe_read_end = childPipe[0];
 
     childInfo->runningTaskInformation->pid = pid;
 }
@@ -644,9 +591,14 @@ void respawnTask() {
     // wait for it to die
     int status;
     waitpid(runInfo->pid, &status, 0);
-    // close old pipe
+
+    // Close both ends of the old pipe
     if (close(runInfo->pipe_read_end)) {
-        perror("close pipe before respawn");
+        perror("close reading pipe end for respawn");
+        abort();
+    }
+    if (close(runInfo->pipe_write_end)) {
+        perror("close writing pipe end for respawn");
         abort();
     }
 
@@ -692,7 +644,9 @@ void runTasks(TaskList *list) {
         (numTasks * sizeof(RunningTaskInformation) + 4095) & ~4095;
     if (sizeForRunningTaskInformation == 0)
       sizeForRunningTaskInformation = 4096;
-    void *runningTaskInformationPages = mmap(0, sizeForRunningTaskInformation, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+    void *runningTaskInformationPages =
+        mmap(0, sizeForRunningTaskInformation, PROT_READ | PROT_WRITE,
+             MAP_SHARED | MAP_ANON, -1, 0);
     if (runningTaskInformationPages == MAP_FAILED) {
         perror("mmap runningTaskInformation");
         abort();
@@ -708,8 +662,54 @@ void runTasks(TaskList *list) {
     // Get a direct pointer to the mprotect function.
     childInfo->mProtectFn = mprotect;
 
+    // make sure that stats are allocated
+    get_stats();
+
     fflush(stdout);
     fflush(stderr);
+
+    // printf("Collecting memory mapping...\n"); fflush(stdout);
+
+    char *alignedTaskInfo =
+        (char *)((uint64_t)childInfo->runningTaskInformation & ~4095ULL);
+    std::pair<void *, void *> unprotectedRanges[] = {
+      std::make_pair(childInfo, (char *)childInfo + 4096),
+      std::make_pair(alignedTaskInfo, alignedTaskInfo + 4096),
+      std::make_pair(childInfo->stack,
+                     (char *)childInfo->stack + childInfo->stackSize),
+      std::make_pair(runningTaskInformationPages,
+                     (char *)runningTaskInformationPages +
+                         sizeForRunningTaskInformation),
+    };
+    unsigned numUnprotectedRanges =
+        sizeof(unprotectedRanges) / sizeof(*unprotectedRanges);
+
+    int32_t memoryRangeCapacity =
+        ((uint64_t)childInfo + 4096 - (uint64_t)(childInfo->rangesToProtect)) /
+        sizeof(RangeToProtect);
+    // printf("capacity for memory ranges: %d\n", memoryRangeCapacity);
+    childInfo->numRangesToProtect =
+        collectRangesToProtect(childInfo->rangesToProtect, memoryRangeCapacity,
+                               unprotectedRanges, numUnprotectedRanges);
+    if (childInfo->numRangesToProtect == -1) {
+      fprintf(stderr, "memory ranges to protect exceed capacity of %d\n",
+              memoryRangeCapacity);
+      abort();
+    }
+
+    // Now allocate a new stack, so that the different tasks don't collide on
+    // that.
+    size_t stackSize = 1 << 22;
+    void *stack = mmap(0, stackSize, PROT_READ | PROT_WRITE,
+                       MAP_ANON | MAP_PRIVATE, 0, 0);
+    if (stack == MAP_FAILED) {
+      perror("mmap task stack");
+      abort();
+    }
+    // printf("new stack: %p\n", stack); fflush(stdout);
+
+    childInfo->stack = stack;
+    childInfo->stackSize = stackSize;
 
     {
         TLSTask *task = list->getFirstTask();
@@ -725,10 +725,9 @@ void runTasks(TaskList *list) {
     PageHashSet modifiedPages(mmap, munmap);
 
     DEBUG(printf("waiting for all children...\n"); fflush(stdout));
-    /*
-    char tmpPage[4096];
-    */
     TLSTask *task = list->getFirstTask();
+    size_t touchedRegionsBytes = 0;
+    iovec *touchedRegions = nullptr;
     for (uint32_t i = 0; i < numTasks; ) {
         DEBUG(printf("child %d...\n", i); fflush(stdout));
         RunningTaskInformation *thisTaskInfo = &runningTaskInformation[i];
@@ -744,12 +743,14 @@ void runTasks(TaskList *list) {
             timeToWait.tv_sec = now.tv_sec+1;
             timeToWait.tv_nsec = now.tv_usec * 1000ul;
 
-            int ret = pthread_cond_timedwait(&thisTaskInfo->readyCond, &thisTaskInfo->mutex, &timeToWait);
+            int ret = pthread_cond_timedwait(
+                &thisTaskInfo->readyCond, &thisTaskInfo->mutex, &timeToWait);
             if (ret != 0 && ret != ETIMEDOUT) {
                 perror("pthread_cond_wait");
                 abort();
             }
-            DEBUG(printf("isready? --> %d\n", thisTaskInfo->ready); fflush(stdout));
+            DEBUG(printf("isready? --> %d\n", thisTaskInfo->ready);
+                  fflush(stdout));
             /*
             if (kill(thisTaskInfo->pid, 0)) {
                 perror("kill child");
@@ -771,9 +772,15 @@ void runTasks(TaskList *list) {
             }
             pid = waitpid(thisTaskInfo->pid, &status, WNOHANG);
         }
-        DEBUG(printf("child %d is ready. checking for conflicts.\n", i); fflush(stdout));
-        DEBUG(printf("child %d touched %d pages (hash array size %d). %d regions read, %d regions read+written.\n", i, thisTaskInfo->touchedPages.size(), thisTaskInfo->touchedPages.capacity(),
-                thisTaskInfo->numReadRegions, thisTaskInfo->numWrittenRegions); fflush(stdout));
+        DEBUG(printf("child %d is ready. checking for conflicts.\n", i);
+              fflush(stdout));
+        DEBUG(printf("child %d touched %d pages (hash array size %d). %d "
+                     "regions read, %d regions read+written.\n",
+                     i, thisTaskInfo->touchedPages.size(),
+                     thisTaskInfo->touchedPages.capacity(),
+                     thisTaskInfo->numReadRegions,
+                     thisTaskInfo->numWrittenRegions);
+              fflush(stdout));
 
         struct timeval time_before_conflict_checking;
         gettimeofday(&time_before_conflict_checking, nullptr);
@@ -781,19 +788,34 @@ void runTasks(TaskList *list) {
         // Now first read the pages describing the changed memory, then the actual memory pages.
         size_t numTouchedRegions =
             thisTaskInfo->numReadRegions + thisTaskInfo->numWrittenRegions;
-        size_t writtenRangesBytes = numTouchedRegions * sizeof(iovec);
-        std::vector<iovec> touchedRegions(numTouchedRegions);
+        size_t thisTouchedRegionsBytes = numTouchedRegions * sizeof(iovec);
+        if (thisTouchedRegionsBytes > touchedRegionsBytes) {
+          size_t newAllocate = thisTouchedRegionsBytes - touchedRegionsBytes;
+          if (touchedRegionsBytes > newAllocate)
+            newAllocate = touchedRegionsBytes;
+          newAllocate = (newAllocate + 4095) & ~4095ULL;
+          void *newMapping =
+              mmap((char *)touchedRegions + touchedRegionsBytes, newAllocate,
+                   PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+          if (touchedRegions == MAP_FAILED) {
+            perror("mmap touched regions");
+            abort();
+          }
+          if (touchedRegionsBytes == 0)
+            touchedRegions = (iovec*)newMapping;
+          touchedRegionsBytes += newAllocate;
+        }
         size_t bytesRead = 0;
-        while (bytesRead < writtenRangesBytes) {
+        while (bytesRead < thisTouchedRegionsBytes) {
           ssize_t newBytesRead =
               read(thisTaskInfo->pipe_read_end,
-                   ((char *)touchedRegions.data()) + bytesRead,
-                   writtenRangesBytes - bytesRead);
+                   ((char *)touchedRegions) + bytesRead,
+                   thisTouchedRegionsBytes - bytesRead);
           if (newBytesRead <= 0) {
             fprintf(stderr,
                     "could not read more bytes from pipe. %ld out of %ld "
                     "bytes left.\n",
-                    writtenRangesBytes - bytesRead, writtenRangesBytes);
+                    thisTouchedRegionsBytes - bytesRead, touchedRegionsBytes);
             fflush(stderr);
             abort();
           }
@@ -807,8 +829,8 @@ void runTasks(TaskList *list) {
             modifiedPages.size()) {
           DEBUG(printf("Verifying read regions...\n"); fflush(stdout));
           // Note: also the modified pages might have been read...
-          for (auto reg = touchedRegions.begin(), regEnd = touchedRegions.end();
-               reg != regEnd && valid; ++reg) {
+          for (iovec *reg = touchedRegions, *end = reg + numTouchedRegions;
+               reg != end && valid; ++reg) {
             uint64_t pageAddr = (uint64_t)reg->iov_base;
             DEBUG(printf("  - %p   (%lu bytes == %lu page%s)\n",
                          (void *)pageAddr, reg->iov_len, reg->iov_len / 4096,
@@ -835,7 +857,7 @@ void runTasks(TaskList *list) {
                                  time_before_conflict_checking.tv_usec)));
 
         if (!valid) {
-            __sync_fetch_and_add(&stats.num_rollbacks, 1);
+            __sync_fetch_and_add(&get_stats()->num_rollbacks, 1);
 
             waitForChildren(runningTaskInformation, 0, i);
             fflush(stdout); fflush(stderr);
@@ -848,9 +870,10 @@ void runTasks(TaskList *list) {
 
         DEBUG(printf("Writing back modified regions...\n"); fflush(stdout));
 
+        //char old[4096];
         // Now read the modified memory pages.
-        for (auto reg = touchedRegions.begin()+thisTaskInfo->numReadRegions,
-                regEnd = touchedRegions.end(); reg != regEnd; ++reg) {
+        for (iovec *reg = touchedRegions, *end = reg + numTouchedRegions;
+             reg != end; ++reg) {
             // Add to modified set
             uint64_t pageAddr = (uint64_t) reg->iov_base;
             for (size_t pagesRemaining = reg->iov_len >> 12; pagesRemaining; --pagesRemaining, pageAddr += 4096)
@@ -863,6 +886,7 @@ void runTasks(TaskList *list) {
                          bytesRemaining, bytesRemaining / 4096,
                          bytesRemaining == 4096 ? "" : "s");
                   fflush(stdout));
+            //memcpy(old, memPtr, 4096);
             while (bytesRemaining > 0) {
                 size_t newBytes = read(thisTaskInfo->pipe_read_end, memPtr, bytesRemaining);
                 if (newBytes == 0) {
@@ -873,23 +897,34 @@ void runTasks(TaskList *list) {
                 memPtr += newBytes;
                 bytesRemaining -= newBytes;
             }
+            //char *newP = static_cast<char *>(reg->iov_base);
+            //for (int i = 0; i < 4096; ++i) {
+            //  if (old[i] != newP[i]) {
+            //    printf("changed byte at %p: %02x -> %02x\n", (void *)(newP + i),
+            //           (int)(old[i]), (int)(newP[i]));
+            //  }
+            //}
         }
 
-        // Then close the read end of the pipe
+        // Then close both ends of the pipe
         if (close(thisTaskInfo->pipe_read_end)) {
-            perror("close pipe after reading modified pages");
+            perror("close read pipe after reading modified pages");
+            abort();
+        }
+        if (close(thisTaskInfo->pipe_write_end)) {
+            perror("close write pipe after reading modified pages");
             abort();
         }
 
         struct timeval time_after_commit;
         gettimeofday(&time_after_commit, nullptr);
 
-        stats.micros_conflict_checking +=
+        get_stats()->micros_conflict_checking +=
             1000000UL * (time_after_conflict_checking.tv_sec -
                          time_before_conflict_checking.tv_sec) +
             time_after_conflict_checking.tv_usec -
             time_before_conflict_checking.tv_usec;
-        stats.micros_commit +=
+        get_stats()->micros_commit +=
             1000000UL * (time_after_commit.tv_sec -
                          time_after_conflict_checking.tv_sec) +
             time_after_commit.tv_usec - time_after_conflict_checking.tv_usec;
@@ -898,6 +933,14 @@ void runTasks(TaskList *list) {
         ++i;
         task = task->next();
     }
+
+    if (touchedRegionsBytes > 0) {
+      if (munmap(touchedRegions, touchedRegionsBytes) != 0) {
+        perror("munmap touched regions");
+        abort();
+      }
+    }
+
     DEBUG(printf("validated all children. waiting for them to exit.\n"); fflush(stdout));
     waitForChildren(runningTaskInformation, 0, numTasks);
     DEBUG(printf("all children completed.\n"); fflush(stdout));
@@ -917,9 +960,9 @@ void runTasks(TaskList *list) {
 
 extern "C" {
 
-    void utls_reset_stats() { memset(&stats, 0, sizeof(stats)); }
+    void utls_reset_stats() { memset(get_stats(), 0, sizeof(*get_stats())); }
 
-    struct utls_stats utls_get_stats() { return stats; }
+    struct utls_stats utls_get_stats() { return *get_stats(); }
 
     void utls_run(void *list0) {
         TaskList *list = (TaskList*) list0;
