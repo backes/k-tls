@@ -29,7 +29,9 @@ will output a warning and skip compilation of the kernel module.
 Usage
 =====
 
-Before running experiments using K-TLS, make sure to load the kernel module:
+Before running experiments using K-TLS, make sure to load the kernel module.
+Since this is **very experimental**, I strongly recommend to run this in a
+**virtual machine only**!
 ```
   sudo insmod lib/KTLS/kmod/KTLS.ko
 ```
